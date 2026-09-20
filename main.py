@@ -6,7 +6,10 @@ import numpy as np
 import requests
 from pydantic import BaseModel
 
+from server_timing import ServerTimingMiddleware, timed_stage
+
 app = FastAPI()
+app.add_middleware(ServerTimingMiddleware)
 
 # ------------------------------
 # 1) Cargar Modelo
@@ -18,19 +21,21 @@ class_names = ['ADOBO AREQUIPENO', 'AGUADITO DE POLLO', 'AJI DE GALLINA', 'ANTIC
 
 
 def predecir_imagen(img, model, class_names, img_size=(224,224)):
-    # Convertir a RGB (por si la imagen tiene transparencia/RGBA)
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    # Redimensionar imagen
-    img = img.resize(img_size)
-    img_array = tf.keras.preprocessing.image.img_to_array(img)
-    img_array = tf.expand_dims(img_array, 0)   # (1,224,224,3)
+    with timed_stage("preprocess"):
+        # Convertir a RGB (por si la imagen tiene transparencia/RGBA)
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        # Redimensionar imagen
+        img = img.resize(img_size)
+        img_array = tf.keras.preprocessing.image.img_to_array(img)
+        img_array = tf.expand_dims(img_array, 0)   # (1,224,224,3)
 
-    # Preprocesar igual que EfficientNet
-    img_array = tf.keras.applications.efficientnet_v2.preprocess_input(img_array)
+        # Preprocesar igual que EfficientNet
+        img_array = tf.keras.applications.efficientnet_v2.preprocess_input(img_array)
 
     # Predicción
-    preds = model.predict(img_array, verbose=0)[0]
+    with timed_stage("inference"):
+        preds = model.predict(img_array, verbose=0)[0]
 
     # Top 1 clase y probabilidad
     top1_idx = np.argmax(preds)
@@ -46,9 +51,11 @@ class ImageUrlRequest(BaseModel):
 @app.post("/detect-food")
 async def predict(request: ImageUrlRequest):
 
-    response = requests.get(request.imageUrl)
-    img = Image.open(BytesIO(response.content))
-    
+    with timed_stage("download"):
+        response = requests.get(request.imageUrl, timeout=30)
+    with timed_stage("decode"):
+        img = Image.open(BytesIO(response.content))
+
     clase, confidence = predecir_imagen(img, model, class_names)
 
     # Si no detecta con una confianza superior al 0.6, devolver un arreglo vacio
